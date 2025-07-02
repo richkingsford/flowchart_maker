@@ -633,39 +633,53 @@ document.addEventListener('DOMContentLoaded', () => {
     function onEndLineReconnection(e) {
         if (!isReconnectingLine) return;
         e.preventDefault();
-        document.removeEventListener('mousemove', onDraggingReconnectionLine); // Ensure mousemove is removed
+        document.removeEventListener('mousemove', onDraggingReconnectionLine);
 
         let newTargetNode = null;
-        const CTM = workflowDiagramSvg.getScreenCTM().inverse();
-        const endPoint = new DOMPoint(e.clientX, e.clientY).matrixTransform(CTM);
+        const eventTargetElement = e.target;
+        console.log("[onEndLineReconnection] Event target:", eventTargetElement);
 
-        // Precise hit detection: Check if mouse is over a connection handle of another node
-        activeNodeMap.forEach(node => {
-            if (node !== reconnectSourceNode && node.svgNode) { // Can't connect to self
-                 // Check against node body first as a fallback, then prefer handles
-                if (endPoint.x >= node.x && endPoint.x <= node.x + node.width &&
-                    endPoint.y >= node.y && endPoint.y <= node.y + node.height) {
-                    newTargetNode = node; // Tentative target
-                }
-                // More precise: check handles (if they are identifiable, e.g., by class or direct reference)
-                const handles = node.svgNode.querySelectorAll('.connection-handle');
-                handles.forEach(handle => {
-                    const r = parseFloat(handle.getAttribute('r'));
-                    // Handle's cx, cy are relative to its node group. Convert to SVG global coords.
-                    const handleParentX = node.x;
-                    const handleParentY = node.y;
-                    const handleCX = handleParentX + parseFloat(handle.getAttribute('cx'));
-                    const handleCY = handleParentY + parseFloat(handle.getAttribute('cy'));
-
-                    if (Math.sqrt((endPoint.x - handleCX)**2 + (endPoint.y - handleCY)**2) <= r * 2) { // Increased hit area for handle
-                        newTargetNode = node; // Confirmed target by handle
-                    }
-                });
+        if (eventTargetElement) {
+            let targetNodeGroup = null;
+            if (eventTargetElement.classList.contains('connection-handle')) {
+                targetNodeGroup = eventTargetElement.closest('.node-group');
+                console.log("[onEndLineReconnection] Target is a connection handle. Parent group:", targetNodeGroup);
+            } else if (eventTargetElement.classList.contains('node-shape')) {
+                targetNodeGroup = eventTargetElement.closest('.node-group');
+                console.log("[onEndLineReconnection] Target is a node shape. Parent group:", targetNodeGroup);
+            } else if (eventTargetElement.classList.contains('node-group')) {
+                // This case might be hit if the click is on the group but not a specific shape/handle inside it.
+                targetNodeGroup = eventTargetElement;
+                console.log("[onEndLineReconnection] Target is a node group directly.");
+            } else if (eventTargetElement.closest && eventTargetElement.closest('.node-group')) {
+                // Fallback for clicking on text or other elements within a node group
+                targetNodeGroup = eventTargetElement.closest('.node-group');
+                 console.log("[onEndLineReconnection] Target is within a node group (e.g. text). Parent group:", targetNodeGroup);
             }
-        });
+
+
+            if (targetNodeGroup && targetNodeGroup.id && targetNodeGroup.id.startsWith('node-')) {
+                const targetNodeId = targetNodeGroup.id.substring('node-'.length);
+                if (reconnectSourceNode && targetNodeId !== reconnectSourceNode.id) { // Can't connect to self
+                    newTargetNode = activeNodeMap.get(targetNodeId);
+                    console.log("[onEndLineReconnection] Identified newTargetNode:", newTargetNode ? newTargetNode.id : 'null from map');
+                } else if (reconnectSourceNode && targetNodeId === reconnectSourceNode.id) {
+                    console.log("[onEndLineReconnection] Attempted to reconnect to source node itself. Invalid.");
+                    newTargetNode = null; // Explicitly nullify if it's self
+                }
+            }
+        }
 
         let connectionSuccessful = false;
-        if (reconnectSourceNode && newTargetNode && newTargetNode.id !== reconnectLineOriginalTargetId) {
+        // Ensure reconnectSourceNode exists before trying to access its id
+        if (reconnectSourceNode && newTargetNode && (newTargetNode.id !== reconnectLineOriginalTargetId || reconnectSourceNode.type === 'decision')) {
+            // Allow reconnecting to the same target ONLY IF it's a decision node and a different option might be chosen
+            // (though current UI doesn't allow choosing a different option, this condition might be useful later)
+            // For now, simpler: if newTargetNode.id === reconnectLineOriginalTargetId, it's only a "successful" no-op if no actual data change needed
+            // Let's refine: a connection is only "successful" if the target is different, or if it's a decision and the text implies a different path (not handled yet)
+            if (newTargetNode.id === reconnectLineOriginalTargetId && reconnectSourceNode.type !== 'decision') {
+                 console.log("Reconnection target is the same as original for a non-decision node. No change needed.");
+            } else {
             console.log(`Reconnecting: ${reconnectSourceNode.id} from ${reconnectLineOriginalTargetId} to ${newTargetNode.id}`);
 
             // --- Update Data Model ---
@@ -772,6 +786,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 e.preventDefault();
                 if (e.button !== 0) return;
 
+                // If already reconnecting a line, this click on a handle is to set the target.
+                // The actual reconnection logic is handled by the global onEndLineReconnection mouseup.
+                // So, if isReconnectingLine is true, this mousedown should essentially do nothing here
+                // to allow the global mouseup (onEndLineReconnection) to fire correctly.
+                if (isReconnectingLine) {
+                    console.log("[Handle mousedown] Currently isReconnectingLine. Letting global mouseup handle target.");
+                    return;
+                }
+
+                // If not reconnecting, then this is for drawing a NEW line from a handle
                 isDrawingLine = true;
                 lineFromNode = node;
                 // lineFromPort = pos.id; // Store which port was clicked
