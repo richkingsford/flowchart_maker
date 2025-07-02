@@ -110,3 +110,17 @@ body {
 }
 
 /* No specific node styles here as they are fully controlled by JS based on schema */
+
+.connection-handle {
+    visibility: hidden; /* Hide by default */
+    opacity: 0;
+    transition: opacity 0.2s ease-in-out, visibility 0.2s ease-in-out;
+    pointer-events: none; /* Initially no pointer events */
+}
+
+.node-group:hover .connection-handle,
+.node-group.show-handles .connection-handle {
+    visibility: visible;
+    opacity: 1;
+    pointer-events: all; /* Enable pointer events when visible */
+}

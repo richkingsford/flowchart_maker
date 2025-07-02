@@ -145,6 +145,13 @@ document.addEventListener('DOMContentLoaded', () => {
     // let lineFromPort = null; // Could specify which port ('top', 'bottom', etc.)
     let tempLineElement = null;
 
+    // States for line reconnection
+    let isReconnectingLine = false;
+    let reconnectSourceNode = null;
+    let reconnectLineOriginalTargetId = null;
+    let reconnectLineDecisionText = null;
+    let tempReconnectionLine = null;
+
 
     // --- Workflow Loading & Main Rendering Orchestration ---
     async function loadWorkflow(workflowFileName) {
@@ -414,6 +421,17 @@ document.addEventListener('DOMContentLoaded', () => {
         group.setAttribute('transform', `translate(${node.x}, ${node.y})`);
         group.style.cursor = 'grab'; // For draggable items
 
+        group.addEventListener('mouseenter', () => {
+            if (!isDrawingLine && !isReconnectingLine) { // Only show on hover if not in a global connection mode
+                group.classList.add('show-handles');
+            }
+        });
+        group.addEventListener('mouseleave', () => {
+            if (!isDrawingLine && !isReconnectingLine) {
+                group.classList.remove('show-handles');
+            }
+        });
+
         let shape;
         if (node.type === 'decision') {
             shape = document.createElementNS(SVG_NS, 'polygon');
@@ -462,8 +480,14 @@ document.addEventListener('DOMContentLoaded', () => {
             line.setAttribute('stroke', settings.colors.line);
             line.setAttribute('class', 'line-connector');
             line.setAttribute('marker-end', 'url(#arrowhead)');
+            line.style.cursor = 'pointer'; // Indicate line is clickable
             workflowDiagramSvg.insertBefore(line, workflowDiagramSvg.firstChild);
             startNode.svgLines[childInfo.id] = line;
+
+            line.addEventListener('click', (e) => {
+                e.stopPropagation(); // Prevent other SVG clicks if necessary
+                onLineClick(e, startNode, childInfo.id, childInfo.text);
+            });
 
             if (childInfo.text) {
                 const labelId = `label-${startNode.id}-to-${childInfo.id}`;
@@ -550,6 +574,171 @@ document.addEventListener('DOMContentLoaded', () => {
         marker.appendChild(polygon);
         defs.appendChild(marker);
     }
+
+    // --- Line Reconnection Logic ---
+    function onLineClick(event, sourceNode, originalTargetId, decisionText) {
+        if (isDrawingLine || isReconnectingLine) return; // Prevent starting if already in a connection mode
+
+        console.log(`Line clicked: from ${sourceNode.id} to ${originalTargetId}, decisionText: ${decisionText}`);
+        isReconnectingLine = true;
+        reconnectSourceNode = sourceNode;
+        reconnectLineOriginalTargetId = originalTargetId;
+        reconnectLineDecisionText = decisionText;
+
+        // Make all connection handles visible
+        activeNodeMap.forEach(n => n.svgNode.classList.add('show-handles'));
+
+        // Create a temporary line for visual feedback
+        const CTM = workflowDiagramSvg.getScreenCTM().inverse();
+        const mousePoint = new DOMPoint(event.clientX, event.clientY).matrixTransform(CTM);
+
+        // Determine start point of temp line (e.g., from original line's start or center of source node)
+        // For simplicity, let's start from the source node's most relevant connection point
+        const lineCoords = getLineCoordinates(reconnectSourceNode, activeNodeMap.get(reconnectLineOriginalTargetId), reconnectLineDecisionText);
+
+
+        tempReconnectionLine = document.createElementNS(SVG_NS, 'line');
+        tempReconnectionLine.setAttribute('x1', String(lineCoords.x1));
+        tempReconnectionLine.setAttribute('y1', String(lineCoords.y1));
+        tempReconnectionLine.setAttribute('x2', String(mousePoint.x));
+        tempReconnectionLine.setAttribute('y2', String(mousePoint.y));
+        tempReconnectionLine.setAttribute('stroke', currentSettings.colors.line || 'black');
+        tempReconnectionLine.setAttribute('stroke-width', '2');
+        tempReconnectionLine.setAttribute('stroke-dasharray', '5,5');
+        tempReconnectionLine.setAttribute('class', 'temp-reconnection-line');
+        workflowDiagramSvg.appendChild(tempReconnectionLine);
+
+        // Hide original line temporarily or change its style
+        const originalLine = reconnectSourceNode.svgLines[reconnectLineOriginalTargetId];
+        if (originalLine) originalLine.style.display = 'none';
+        const originalLabel = reconnectSourceNode.svgLineLabels ? reconnectSourceNode.svgLineLabels[reconnectLineOriginalTargetId] : null;
+        if (originalLabel) originalLabel.style.display = 'none';
+
+
+        document.addEventListener('mousemove', onDraggingReconnectionLine);
+        document.addEventListener('mouseup', onEndLineReconnection, { once: true }); // { once: true } to auto-remove after firing
+    }
+
+    function onDraggingReconnectionLine(e) {
+        if (!isReconnectingLine || !tempReconnectionLine) return;
+        e.preventDefault();
+
+        const CTM = workflowDiagramSvg.getScreenCTM().inverse();
+        const currentPoint = new DOMPoint(e.clientX, e.clientY).matrixTransform(CTM);
+
+        tempReconnectionLine.setAttribute('x2', String(currentPoint.x));
+        tempReconnectionLine.setAttribute('y2', String(currentPoint.y));
+    }
+
+    function onEndLineReconnection(e) {
+        if (!isReconnectingLine) return;
+        e.preventDefault();
+        document.removeEventListener('mousemove', onDraggingReconnectionLine); // Ensure mousemove is removed
+
+        let newTargetNode = null;
+        const CTM = workflowDiagramSvg.getScreenCTM().inverse();
+        const endPoint = new DOMPoint(e.clientX, e.clientY).matrixTransform(CTM);
+
+        // Precise hit detection: Check if mouse is over a connection handle of another node
+        activeNodeMap.forEach(node => {
+            if (node !== reconnectSourceNode && node.svgNode) { // Can't connect to self
+                 // Check against node body first as a fallback, then prefer handles
+                if (endPoint.x >= node.x && endPoint.x <= node.x + node.width &&
+                    endPoint.y >= node.y && endPoint.y <= node.y + node.height) {
+                    newTargetNode = node; // Tentative target
+                }
+                // More precise: check handles (if they are identifiable, e.g., by class or direct reference)
+                const handles = node.svgNode.querySelectorAll('.connection-handle');
+                handles.forEach(handle => {
+                    const r = parseFloat(handle.getAttribute('r'));
+                    // Handle's cx, cy are relative to its node group. Convert to SVG global coords.
+                    const handleParentX = node.x;
+                    const handleParentY = node.y;
+                    const handleCX = handleParentX + parseFloat(handle.getAttribute('cx'));
+                    const handleCY = handleParentY + parseFloat(handle.getAttribute('cy'));
+
+                    if (Math.sqrt((endPoint.x - handleCX)**2 + (endPoint.y - handleCY)**2) <= r * 2) { // Increased hit area for handle
+                        newTargetNode = node; // Confirmed target by handle
+                    }
+                });
+            }
+        });
+
+        let connectionSuccessful = false;
+        if (reconnectSourceNode && newTargetNode && newTargetNode.id !== reconnectLineOriginalTargetId) {
+            console.log(`Reconnecting: ${reconnectSourceNode.id} from ${reconnectLineOriginalTargetId} to ${newTargetNode.id}`);
+
+            // --- Update Data Model ---
+            const oldTargetNode = activeNodeMap.get(reconnectLineOriginalTargetId);
+
+            // 1. Remove old connection from source node's children/options
+            if (reconnectSourceNode.type === 'decision') {
+                const optionIndex = reconnectSourceNode.options.findIndex(opt => opt.nextStepID === reconnectLineOriginalTargetId && opt.decisionText === reconnectLineDecisionText);
+                if (optionIndex > -1) {
+                    // Instead of removing, update the nextStepID of the matched option
+                    reconnectSourceNode.options[optionIndex].nextStepID = newTargetNode.id;
+                    // Update corresponding child entry (if it's simple ID based)
+                    const childIndex = reconnectSourceNode.children.findIndex(c => c.id === reconnectLineOriginalTargetId && c.text === reconnectLineDecisionText);
+                    if(childIndex > -1) reconnectSourceNode.children[childIndex].id = newTargetNode.id;
+
+                } else {
+                     console.warn("Could not find original decision option to update.");
+                }
+            } else { // Action or other node types
+                if (reconnectSourceNode.nextStepID === reconnectLineOriginalTargetId) {
+                    reconnectSourceNode.nextStepID = newTargetNode.id;
+                }
+                 // Update children array
+                const childIndex = reconnectSourceNode.children.findIndex(c => c.id === reconnectLineOriginalTargetId);
+                if (childIndex > -1) {
+                    reconnectSourceNode.children[childIndex].id = newTargetNode.id; // Update ID
+                } else { // If not found (e.g. was implicit), add new one (should ideally not happen if data is consistent)
+                    reconnectSourceNode.children = reconnectSourceNode.children.filter(c => c.id !== reconnectLineOriginalTargetId); // Clean just in case
+                    reconnectSourceNode.children.push({id: newTargetNode.id});
+                }
+            }
+
+            // 2. Remove source node from old target's parents
+            if (oldTargetNode) {
+                const parentIndex = oldTargetNode.parents.indexOf(reconnectSourceNode.id);
+                if (parentIndex > -1) {
+                    oldTargetNode.parents.splice(parentIndex, 1);
+                }
+            }
+
+            // 3. Add source node to new target's parents (if not already there)
+            if (!newTargetNode.parents.includes(reconnectSourceNode.id)) {
+                newTargetNode.parents.push(reconnectSourceNode.id);
+            }
+
+            connectionSuccessful = true;
+            rerenderCurrentWorkflow();
+
+        } else {
+            console.log("Line reconnection cancelled or target is the same/invalid.");
+            // Restore original line visibility if connection was not made
+            if (reconnectSourceNode && reconnectSourceNode.svgLines[reconnectLineOriginalTargetId]) {
+                reconnectSourceNode.svgLines[reconnectLineOriginalTargetId].style.display = '';
+            }
+            if (reconnectSourceNode && reconnectSourceNode.svgLineLabels && reconnectSourceNode.svgLineLabels[reconnectLineOriginalTargetId]) {
+                reconnectSourceNode.svgLineLabels[reconnectLineOriginalTargetId].style.display = '';
+            }
+        }
+
+        // Cleanup
+        if (tempReconnectionLine) {
+            tempReconnectionLine.remove();
+            tempReconnectionLine = null;
+        }
+        isReconnectingLine = false;
+        reconnectSourceNode = null;
+        reconnectLineOriginalTargetId = null;
+        reconnectLineDecisionText = null;
+
+        activeNodeMap.forEach(n => n.svgNode.classList.remove('show-handles')); // Hide all handles
+        // mouseup listener is auto-removed with {once: true} from onLineClick
+    }
+
 
     // --- Connection Handle Logic ---
     function addConnectionHandles(node, settings) {
