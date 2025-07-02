@@ -1,11 +1,20 @@
 document.addEventListener('DOMContentLoaded', () => {
     // --- DOM Element References ---
+    const workflowSelect = document.getElementById('workflowSelect');
     const colorSchemaSelect = document.getElementById('colorSchemaSelect');
     const colorSchemaPreview = document.getElementById('colorSchemaPreview');
     const horizontalSpacingInput = document.getElementById('horizontalSpacing');
     const verticalSpacingInput = document.getElementById('verticalSpacing');
     const downloadSvgButton = document.getElementById('downloadSvgButton');
     const workflowDiagramSvg = document.getElementById('workflowDiagram');
+
+    // --- Available Workflows (Hardcoded for now) ---
+    // In a real app with a backend, this list would likely be fetched.
+    const availableWorkflows = [
+        { name: "QA Process", path: "workflows/qa_process.json" },
+        // Add other workflow files here if they exist, e.g.:
+        // { name: "Sample Workflow 2", path: "workflows/sample2.json" }
+    ];
 
     // --- Color Schemas ---
     const colorSchemas = {
@@ -55,6 +64,15 @@ document.addEventListener('DOMContentLoaded', () => {
     };
 
     // --- Functions ---
+
+    function populateWorkflowSelect() {
+        availableWorkflows.forEach(wf => {
+            const option = document.createElement('option');
+            option.value = wf.path;
+            option.textContent = wf.name;
+            workflowSelect.appendChild(option);
+        });
+    }
 
     function populateColorSchemaDropdown() {
         for (const key in colorSchemas) {
@@ -111,340 +129,322 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // --- SVG Namespace ---
     const SVG_NS = 'http://www.w3.org/2000/svg';
+    const nodePadding = { x: 20, y: 10 };
+    const defaultNodeSize = { width: 160, height: 70 }; // Adjusted min size for better text fit
 
-    // --- Workflow Loading ---
+    // This will hold the processed workflow data, including positions and SVG elements
+    let activeNodeMap = new Map();
+    let draggedNode = null;
+    let dragOffsetX = 0;
+    let dragOffsetY = 0;
+
+    let isDrawingLine = false;
+    let lineFromNode = null;
+    // let lineFromPort = null; // Could specify which port ('top', 'bottom', etc.)
+    let tempLineElement = null;
+
+
+    // --- Workflow Loading & Main Rendering Orchestration ---
     async function loadWorkflow(workflowFileName) {
         try {
             const response = await fetch(workflowFileName);
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
             const data = await response.json();
-            // Assuming the workflow is the first property in the JSON object
             const workflowKey = Object.keys(data)[0];
-            currentWorkflowData = data[workflowKey];
-            console.log("Workflow data loaded:", currentWorkflowData);
-            renderWorkflow(currentWorkflowData, currentSettings);
+            currentWorkflowData = data[workflowKey]; // Keep original for re-layout if needed
+
+            activeNodeMap = prepareWorkflowData(currentWorkflowData);
+            const layoutDimensions = calculateStaticLayout(activeNodeMap, currentSettings);
+            drawDiagram(activeNodeMap, settings, layoutDimensions);
+
+            console.log("Workflow data processed and rendered:", activeNodeMap);
+
         } catch (error) {
             console.error("Error loading workflow:", error);
-            workflowDiagramSvg.innerHTML = `<text x="20" y="40" fill="red">Error loading workflow: ${error.message}</text>`;
+            workflowDiagramSvg.innerHTML = `<text x="20" y="40" fill="red">Error loading: ${error.message}</text>`;
         }
     }
 
-    // --- SVG Rendering Engine ---
-    function renderWorkflow(workflowSteps, settings) {
-        console.log("Rendering workflow with steps:", workflowSteps, "and settings:", settings);
-        workflowDiagramSvg.innerHTML = ''; // Clear previous diagram
+    // This function is called when settings change that require a full re-layout and redraw
+    function rerenderCurrentWorkflow() {
+        if (!currentWorkflowData) return;
+        activeNodeMap = prepareWorkflowData(currentWorkflowData); // Re-prep to reset any drag positions to original logic
+        const layoutDimensions = calculateStaticLayout(activeNodeMap, currentSettings);
+        drawDiagram(activeNodeMap, currentSettings, layoutDimensions);
+    }
+
+
+    // --- Data Preparation and Layout Calculation ---
+    function prepareWorkflowData(workflowSteps) {
+        const nodeMap = new Map();
+        if (!workflowSteps || workflowSteps.length === 0) return nodeMap;
+
+        workflowSteps.forEach(step => {
+            const { width, height } = calculateNodeDimensions(step.name);
+            nodeMap.set(step.id || step.stepID, { // Use step.id if present, fallback to step.stepID
+                ...step,
+                id: step.id || step.stepID,
+                x: 0, y: 0, width, height,
+                centerX: 0, centerY: 0, levelX: 0, levelY: 0,
+                children: [], parents: [],
+                svgNode: null, svgLines: {}, svgLineLabels: {}
+            });
+        });
+
+        nodeMap.forEach(node => {
+            const nextStepInfos = [];
+            if (node.type === 'decision' && node.options) {
+                node.options.forEach(opt => nextStepInfos.push({ id: opt.nextStepID, text: opt.decisionText }));
+            } else if (node.nextStepID) {
+                nextStepInfos.push({ id: node.nextStepID });
+            }
+
+            nextStepInfos.forEach(nextInfo => {
+                if (nodeMap.has(nextInfo.id)) {
+                    node.children.push(nextInfo);
+                    nodeMap.get(nextInfo.id).parents.push(node.id);
+                }
+            });
+        });
+        return nodeMap;
+    }
+
+    function calculateNodeDimensions(stepName) {
+        const avgCharWidth = 8;
+        const maxCharsPerLine = Math.floor((defaultNodeSize.width - 2 * nodePadding.x) / avgCharWidth);
+        const words = String(stepName).split(/[\s-]+/); // Ensure stepName is a string
+        let lines = 1;
+        let currentLineLength = 0;
+        words.forEach(word => {
+            if (currentLineLength + word.length + (currentLineLength > 0 ? 1 : 0) > maxCharsPerLine) {
+                lines++;
+                currentLineLength = word.length;
+            } else {
+                currentLineLength += word.length + (currentLineLength > 0 ? 1 : 0);
+            }
+        });
+        const textHeight = lines * 12 * 1.2;
+        const height = Math.max(defaultNodeSize.height, textHeight + 2 * nodePadding.y);
+        const width = defaultNodeSize.width;
+        return { width, height };
+    }
+
+    function calculateStaticLayout(nodeMap, settings) {
+        if (nodeMap.size === 0) return { maxX: 0, maxY: 0 };
+        const positionedNodes = new Set();
+        let currentGlobalMaxX = 0;
+        let currentGlobalMaxY = 0;
+
+        function positionRecursive(nodeId, currentX, currentY, levelX = 0, levelY = 0) {
+            const node = nodeMap.get(nodeId);
+            if (!node) return;
+
+            if (positionedNodes.has(nodeId)) {
+                if (levelY > node.levelY) node.levelY = levelY;
+                if (levelX > node.levelX) node.levelX = levelX;
+                return;
+            }
+
+            node.x = currentX;
+            node.y = currentY;
+            node.centerX = currentX + node.width / 2;
+            node.centerY = currentY + node.height / 2;
+            node.levelX = levelX;
+            node.levelY = levelY;
+            positionedNodes.add(nodeId);
+
+            currentGlobalMaxX = Math.max(currentGlobalMaxX, node.x + node.width);
+            currentGlobalMaxY = Math.max(currentGlobalMaxY, node.y + node.height);
+
+            const children = node.children;
+            if (node.type === 'decision' && children.length > 0) {
+                const optionYes = children.find(opt => opt.text && opt.text.toLowerCase() === 'yes');
+                const optionNo = children.find(opt => opt.text && opt.text.toLowerCase() === 'no');
+
+                if (optionYes && nodeMap.has(optionYes.id)) {
+                    positionRecursive(optionYes.id, node.x + node.width + settings.hSpacing, node.y, levelX + 1, levelY);
+                }
+                if (optionNo && nodeMap.has(optionNo.id)) {
+                    let maxYAtCurrentX = node.y + node.height;
+                    nodeMap.forEach(n => {
+                        if(n.id !== nodeId && n.x === node.x && (n.y + n.height) > maxYAtCurrentX && positionedNodes.has(n.id)) {
+                             maxYAtCurrentX = n.y + n.height;
+                        }
+                    });
+                    positionRecursive(optionNo.id, node.x, maxYAtCurrentX + settings.vSpacing, levelX, levelY + 1);
+                }
+                // Simplified: other options are not specially positioned beyond the Yes/No paths for now in static layout
+            } else if (children.length > 0) {
+                const nextChildInfo = children[0];
+                if (nodeMap.has(nextChildInfo.id)) {
+                    let nextNodeX = node.x + node.width / 4 + settings.hSpacing / 2; // Default diagonal
+                    let nextNodeY = node.y + node.height + settings.vSpacing;
+                    positionRecursive(nextChildInfo.id, nextNodeX, nextNodeY, levelX + 1, levelY + 1);
+                }
+            }
+        }
+
+        const startNodes = Array.from(nodeMap.values()).filter(n => n.parents.length === 0 || n.parents.every(pID => !nodeMap.has(pID)));
+        if (startNodes.length === 0 && nodeMap.size > 0) {
+            startNodes.push(nodeMap.get(Array.from(nodeMap.keys())[0]));
+        }
+        startNodes.forEach((startNode, index) => {
+            positionRecursive(startNode.id, 50 + index * (defaultNodeSize.width + settings.hSpacing), 50, index, 0);
+        });
+
+        return { maxX: currentGlobalMaxX, maxY: currentGlobalMaxY };
+    }
+
+    // --- SVG Drawing Engine ---
+    function drawDiagram(nodeMap, settings, layoutDimensions) {
+        workflowDiagramSvg.innerHTML = '';
         workflowDiagramSvg.style.backgroundColor = settings.colors.background;
 
-
-        if (!workflowSteps || workflowSteps.length === 0) {
+        if (nodeMap.size === 0) {
             const textElement = document.createElementNS(SVG_NS, 'text');
-            textElement.setAttribute('x', '20');
-            textElement.setAttribute('y', '40');
-            textElement.setAttribute('fill', settings.colors.action.text || 'black');
-            textElement.textContent = "No workflow steps to display.";
+            textElement.setAttribute('x', '20'); textElement.setAttribute('y', '40');
+            textElement.setAttribute('fill', settings.colors.action ? settings.colors.action.text : 'black');
+            textElement.textContent = "No workflow steps.";
             workflowDiagramSvg.appendChild(textElement);
             return;
         }
 
-        const nodePositions = {}; // Stores { stepID: { x, y, width, height, centerX, centerY, levelX, levelY } }
-        const nodeElements = {};  // Stores { stepID: svgElement }
-        const nodePadding = { x: 20, y: 10 };
-        const defaultNodeSize = { width: 160, height: 70 }; // Adjusted min size for better text fit
+        nodeMap.forEach(node => drawNode(node, settings));
+        nodeMap.forEach(node => drawLinesForNode(node, nodeMap, settings));
 
-        // Create a map for easy lookup and add parent/child info
-        const stepsMap = new Map();
-        workflowSteps.forEach(step => {
-            stepsMap.set(step.stepID, { ...step, children: [], parents: [] });
-        });
+        addArrowheadMarker(settings);
 
-        // Populate children and parents
-        workflowSteps.forEach(step => {
-            const currentStepInfo = stepsMap.get(step.stepID);
-            const nextSteps = [];
-            if (step.type === 'decision' && step.options) {
-                step.options.forEach(opt => nextSteps.push({id: opt.nextStepID, text: opt.decisionText}));
-            } else if (step.nextStepID) {
-                nextSteps.push({id: step.nextStepID});
-            }
+        const padding = 50;
+        const finalWidth = layoutDimensions.maxX > 0 ? layoutDimensions.maxX + padding : 800;
+        const finalHeight = layoutDimensions.maxY > 0 ? layoutDimensions.maxY + padding : 600;
+        workflowDiagramSvg.setAttribute('width', String(finalWidth));
+        workflowDiagramSvg.setAttribute('height', String(finalHeight));
+        workflowDiagramSvg.setAttribute('viewBox', `0 0 ${finalWidth} ${finalHeight}`);
+    }
 
-            nextSteps.forEach(next => {
-                if (stepsMap.has(next.id)) {
-                    currentStepInfo.children.push(next);
-                    stepsMap.get(next.id).parents.push(step.stepID);
-                }
-            });
-        });
+    function drawNode(node, settings) {
+        const nodeColors = settings.colors[node.type] || settings.colors.action;
+        const group = document.createElementNS(SVG_NS, 'g');
+        group.setAttribute('id', `node-${node.id}`);
+        group.setAttribute('class', `node-group ${node.type}-node`);
+        group.setAttribute('transform', `translate(${node.x}, ${node.y})`);
+        group.style.cursor = 'grab'; // For draggable items
 
-        const positionedNodes = new Set();
-        let globalMaxX = 0;
-        let globalMaxY = 0;
-
-        function calculateNodeSize(stepName) {
-            // This is a simplified text width calculation.
-            // For accurate results, measure text in the DOM or use a canvas.
-            const avgCharWidth = 8; // Average character width for 12px font
-            const maxCharsPerLine = Math.floor((defaultNodeSize.width - 2 * nodePadding.x) / avgCharWidth);
-            const words = stepName.split(' ');
-            let lines = 1;
-            let currentLineLength = 0;
-            words.forEach(word => {
-                if (currentLineLength + word.length + (currentLineLength > 0 ? 1 : 0) > maxCharsPerLine) {
-                    lines++;
-                    currentLineLength = word.length;
-                } else {
-                    currentLineLength += word.length + (currentLineLength > 0 ? 1 : 0);
-                }
-            });
-            const textHeight = lines * 12 * 1.2; // 12px font size, 1.2em line height
-            const nodeHeight = Math.max(defaultNodeSize.height, textHeight + 2 * nodePadding.y);
-            const nodeWidth = defaultNodeSize.width; // Keep width fixed for now for simplicity in grid
-            return { width: nodeWidth, height: nodeHeight };
+        let shape;
+        if (node.type === 'decision') {
+            shape = document.createElementNS(SVG_NS, 'polygon');
+            shape.setAttribute('points', `${node.width/2},0 ${node.width},${node.height/2} ${node.width/2},${node.height} 0,${node.height/2}`);
+        } else if (node.type === 'terminal') {
+            shape = document.createElementNS(SVG_NS, 'ellipse');
+            shape.setAttribute('cx', String(node.width / 2)); shape.setAttribute('cy', String(node.height / 2));
+            shape.setAttribute('rx', String(node.width / 2)); shape.setAttribute('ry', String(node.height / 2));
+        } else {
+            shape = document.createElementNS(SVG_NS, 'rect');
+            shape.setAttribute('width', String(node.width)); shape.setAttribute('height', String(node.height));
+            shape.setAttribute('rx', '5'); shape.setAttribute('ry', '5');
         }
+        shape.setAttribute('class', 'node-shape');
+        shape.setAttribute('fill', nodeColors.fill); shape.setAttribute('stroke', nodeColors.stroke);
+        group.appendChild(shape);
 
-        function positionNodesRecursive(stepID, currentX, currentY, levelX = 0, levelY = 0) {
-            if (positionedNodes.has(stepID)) {
-                // If node is already positioned, update its level if this path is 'deeper'
-                // This helps in deciding which connection point to use for incoming lines for merged paths
-                if (levelY > nodePositions[stepID].levelY) {
-                    nodePositions[stepID].levelY = levelY;
-                }
-                 if (levelX > nodePositions[stepID].levelX) {
-                    nodePositions[stepID].levelX = levelX;
-                }
-                return;
+        const textElement = createSvgText(node.name, node.width / 2, node.height / 2, node.width - nodePadding.x * 1.5, nodeColors.text);
+        group.appendChild(textElement);
+        workflowDiagramSvg.appendChild(group);
+        node.svgNode = group;
+        makeDraggable(node);
+        addConnectionHandles(node, settings); // Add connection points
+    }
+
+    function drawLinesForNode(startNode, nodeMap, settings) {
+        if (!startNode.svgLines) startNode.svgLines = {};
+        if (!startNode.svgLineLabels) startNode.svgLineLabels = {};
+
+        startNode.children.forEach(childInfo => {
+            const endNode = nodeMap.get(childInfo.id);
+            if (!endNode) return;
+
+            const lineId = `line-${startNode.id}-to-${childInfo.id}`;
+            const line = document.createElementNS(SVG_NS, 'line');
+            line.setAttribute('id', lineId);
+
+            const {x1, y1, x2, y2} = getLineCoordinates(startNode, endNode, childInfo.text);
+
+            line.setAttribute('x1', String(x1)); line.setAttribute('y1', String(y1));
+            line.setAttribute('x2', String(x2)); line.setAttribute('y2', String(y2));
+            line.setAttribute('stroke', settings.colors.line);
+            line.setAttribute('class', 'line-connector');
+            line.setAttribute('marker-end', 'url(#arrowhead)');
+            workflowDiagramSvg.insertBefore(line, workflowDiagramSvg.firstChild);
+            startNode.svgLines[childInfo.id] = line;
+
+            if (childInfo.text) {
+                const labelId = `label-${startNode.id}-to-${childInfo.id}`;
+                const textLabel = document.createElementNS(SVG_NS, 'text');
+                textLabel.setAttribute('id', labelId);
+                // Position label near the middle of the line, slightly offset
+                const midX = (x1 + x2) / 2;
+                const midY = (y1 + y2) / 2;
+                const offsetX = (x1 > x2 || y1 > y2 && !(x1 < x2 && y1 <y2)) ? -15 : 15; // Basic offset logic
+                const offsetY = -15;
+
+                textLabel.setAttribute('x', String(midX + offsetX));
+                textLabel.setAttribute('y', String(midY + offsetY));
+                textLabel.setAttribute('fill', settings.colors.lineLabel);
+                textLabel.setAttribute('class', 'line-label');
+                textLabel.textContent = childInfo.text;
+                workflowDiagramSvg.insertBefore(textLabel, line);
+                startNode.svgLineLabels[childInfo.id] = textLabel;
             }
+        });
+    }
 
-            const step = stepsMap.get(stepID);
-            if (!step) return;
+    function getLineCoordinates(startNode, endNode, decisionText = null) {
+        let x1 = startNode.x + startNode.width / 2;
+        let y1 = startNode.y + startNode.height / 2;
+        let x2 = endNode.x + endNode.width / 2;
+        let y2 = endNode.y + endNode.height / 2;
 
-            const { width, height } = calculateNodeSize(step.name);
+        if (startNode.type === 'decision') {
+            if (decisionText && decisionText.toLowerCase() === 'yes') {
+                x1 = startNode.x + startNode.width;
+            } else {
+                y1 = startNode.y + startNode.height;
+            }
+        } else {
+            y1 = startNode.y + startNode.height;
+        }
+        y2 = endNode.y; // Default entry point is top-center
 
-            nodePositions[stepID] = { x: currentX, y: currentY, width, height, centerX: currentX + width / 2, centerY: currentY + height / 2, levelX, levelY };
-            positionedNodes.add(stepID);
-
-            globalMaxX = Math.max(globalMaxX, currentX + width);
-            globalMaxY = Math.max(globalMaxY, currentY + height);
-
-            const nextChildren = step.children;
-
-            if (step.type === 'decision' && nextChildren.length > 0) {
-                const optionYes = nextChildren.find(opt => opt.text && opt.text.toLowerCase() === 'yes');
-                const optionNo = nextChildren.find(opt => opt.text && opt.text.toLowerCase() === 'no');
-                const otherOptions = nextChildren.filter(opt => opt !== optionYes && opt !== optionNo);
-
-
-                // "Yes" branch goes right
-                if (optionYes && stepsMap.has(optionYes.id)) {
-                    // Try to place it right, if that spot is "lower" than current node's y, use currentY for next
-                    const nextNodeX = currentX + width + settings.hSpacing;
-                    const nextNodeY = currentY;
-                    positionNodesRecursive(optionYes.id, nextNodeX, nextNodeY, levelX + 1, levelY);
-                }
-
-                // "No" branch goes down
-                if (optionNo && stepsMap.has(optionNo.id)) {
-                    const nextNodeX = currentX; // Align with current decision node's X
-                    // Find max Y of all nodes at current levelX or simply go below current.
-                    // For simplicity, just go below current, might need refinement for complex layouts.
-                    let maxYAtCurrentX = currentY + height;
-                    Object.values(nodePositions).forEach(pos => {
-                        if(pos.x === currentX && pos.y + pos.height > maxYAtCurrentX && pos !== nodePositions[stepID]) {
-                            maxYAtCurrentX = pos.y + pos.height;
-                        }
-                    });
-
-                    const nextNodeY = maxYAtCurrentX + settings.vSpacing;
-                    positionNodesRecursive(optionNo.id, nextNodeX, nextNodeY, levelX, levelY + 1);
-                }
-
-                // Handle other options if any (e.g. place them below the "No" branch)
-                 let yOffsetForOthers = currentY + height + settings.vSpacing;
-                 if (optionNo && nodePositions[optionNo.id]) {
-                     yOffsetForOthers = nodePositions[optionNo.id].y + nodePositions[optionNo.id].height + settings.vSpacing;
-                 }
-
-                otherOptions.forEach((opt, index) => {
-                    if (stepsMap.has(opt.id)) {
-                        const nextNodeX = currentX - settings.hSpacing; // Example: place to the left or further down
-                        const nextNodeY = yOffsetForOthers + index * (defaultNodeSize.height + settings.vSpacing);
-                        positionNodesRecursive(opt.id, nextNodeX, nextNodeY, levelX -1, levelY + 1 + index);
-                    }
-                });
-
-
-            } else if (nextChildren.length > 0) { // Action or Terminal with a next step
-                const nextStepInfo = nextChildren[0]; // Assuming single next step for action/terminal
-                if (stepsMap.has(nextStepInfo.id)) {
-                    // Default: move diagonally down-right
-                    let nextNodeX = currentX + width / 4 + settings.hSpacing / 2; // Slight right shift
-                    let nextNodeY = currentY + height + settings.vSpacing;
-
-                    // A very basic attempt to avoid collision by checking if next X,Y is too close to an existing node
-                    // This is not a full collision detection system.
-                    let potentialCollision = false;
-                    for (const [pid, ppos] of Object.entries(nodePositions)) {
-                        if (pid !== stepID && pid !== nextStepInfo.id) {
-                             if (Math.abs(ppos.x - nextNodeX) < defaultNodeSize.width && Math.abs(ppos.y - nextNodeY) < defaultNodeSize.height) {
-                                potentialCollision = true;
-                                break;
-                             }
-                        }
-                    }
-
-                    if(potentialCollision) { // If collision, try to move further right or down
-                        // Heuristic: if the target node is to the left (loop), keep X, just increase Y
-                        const targetNode = nodePositions[nextStepInfo.id];
-                        if (targetNode && targetNode.x < currentX) {
-                            nextNodeX = currentX;
-                            nextNodeY = Math.max(nextNodeY, targetNode.y - height - settings.vSpacing); // Ensure enough space for line
-                        } else {
-                             // Try shifting right more significantly if it's not a loop back.
-                             nextNodeX = currentX + width + settings.hSpacing;
-                        }
-                    }
-
-
-                    positionNodesRecursive(nextStepInfo.id, nextNodeX, nextNodeY, levelX + 1, levelY + 1);
-                }
+        // Adjust if nodes are side-by-side for better connection points
+        const yDiff = Math.abs((startNode.y + startNode.height/2) - (endNode.y + endNode.height/2));
+        if (yDiff < Math.max(startNode.height, endNode.height) / 1.5) { // If nodes are roughly aligned horizontally
+            if (endNode.x > startNode.x + startNode.width * 0.9) { // End node is to the right
+                x1 = startNode.x + startNode.width;
+                y1 = startNode.y + startNode.height / 2;
+                x2 = endNode.x;
+                y2 = endNode.y + endNode.height / 2;
+            } else if (endNode.x + endNode.width < startNode.x * 0.9) { // End node is to the left
+                x1 = startNode.x;
+                y1 = startNode.y + startNode.height / 2;
+                x2 = endNode.x + endNode.width;
+                y2 = endNode.y + endNode.height / 2;
             }
         }
+        return {x1, y1, x2, y2};
+    }
 
-        // Find starting nodes (nodes with no parents or parents not in current workflow)
-        const startNodes = Array.from(stepsMap.values()).filter(s => s.parents.length === 0 || s.parents.every(pID => !stepsMap.has(pID)));
-        if (startNodes.length === 0 && workflowSteps.length > 0) { // Fallback for circular dependencies or single node
-            startNodes.push(stepsMap.get(workflowSteps[0].stepID));
+    function addArrowheadMarker(settings) {
+        let defs = workflowDiagramSvg.querySelector('defs');
+        if (!defs) {
+            defs = document.createElementNS(SVG_NS, 'defs');
+            workflowDiagramSvg.insertBefore(defs, workflowDiagramSvg.firstChild);
         }
 
-        let initialX = 50;
-        let initialY = 50;
-        startNodes.forEach((startNode, index) => {
-            // Stagger start nodes slightly if multiple are present
-            positionNodesRecursive(startNode.stepID, initialX + index * (defaultNodeSize.width + settings.hSpacing), initialY, index, 0);
-        });
+        const oldMarker = defs.querySelector('#arrowhead');
+        if (oldMarker) {
+            defs.removeChild(oldMarker);
+        }
 
-        // Draw nodes
-        Array.from(stepsMap.values()).forEach(step => {
-            if (!nodePositions[step.stepID]) {
-                console.warn(`Node ${step.stepID} (${step.name}) was not positioned. Skipping.`);
-                return; // Skip if not positioned (e.g. disconnected part of graph)
-            }
-
-            const pos = nodePositions[step.stepID];
-            const nodeColors = settings.colors[step.type] || settings.colors.action;
-            const nodeGroup = document.createElementNS(SVG_NS, 'g');
-            nodeGroup.setAttribute('class', `node-group ${step.type}-node`);
-            nodeGroup.setAttribute('transform', `translate(${pos.x}, ${pos.y})`);
-
-            let shape;
-            if (step.type === 'decision') {
-                shape = document.createElementNS(SVG_NS, 'polygon');
-                shape.setAttribute('points', `${pos.width/2},0 ${pos.width},${pos.height/2} ${pos.width/2},${pos.height} 0,${pos.height/2}`);
-            } else if (step.type === 'terminal') {
-                shape = document.createElementNS(SVG_NS, 'ellipse');
-                shape.setAttribute('cx', pos.width / 2);
-                shape.setAttribute('cy', pos.height / 2);
-                shape.setAttribute('rx', pos.width / 2);
-                shape.setAttribute('ry', pos.height / 2);
-            } else { // action
-                shape = document.createElementNS(SVG_NS, 'rect');
-                shape.setAttribute('width', pos.width);
-                shape.setAttribute('height', pos.height);
-                shape.setAttribute('rx', '5');
-                shape.setAttribute('ry', '5');
-            }
-            shape.setAttribute('class', 'node-shape');
-            shape.setAttribute('fill', nodeColors.fill);
-            shape.setAttribute('stroke', nodeColors.stroke);
-            nodeGroup.appendChild(shape);
-
-            const textElement = createSvgText(step.name, pos.width / 2, pos.height / 2, pos.width - nodePadding.x * 1.5, nodeColors.text);
-            nodeGroup.appendChild(textElement);
-            workflowDiagramSvg.appendChild(nodeGroup);
-            nodeElements[step.stepID] = nodeGroup;
-        });
-
-        // Draw lines
-        Array.from(stepsMap.values()).forEach(step => {
-            const startPos = nodePositions[step.stepID];
-            if (!startPos) return;
-
-            const children = step.children;
-            children.forEach(childInfo => {
-                const endPos = nodePositions[childInfo.id];
-                if (!endPos) return;
-
-                const line = document.createElementNS(SVG_NS, 'line');
-                let x1 = startPos.centerX;
-                let y1 = startPos.centerY;
-                let x2 = endPos.centerX;
-                let y2 = endPos.centerY;
-
-                // Adjust line start/end points to connect to node borders
-                // This is a simplified approach. More robust would be intersection of line with shape.
-                if (step.type === 'decision') {
-                    if (childInfo.text && childInfo.text.toLowerCase() === 'yes') { // Right exit
-                        x1 = startPos.x + startPos.width;
-                        y1 = startPos.centerY;
-                    } else { // Bottom exit for "No" or other
-                        x1 = startPos.centerX;
-                        y1 = startPos.y + startPos.height;
-                    }
-                } else { // Default bottom exit for actions/terminals
-                    x1 = startPos.centerX;
-                    y1 = startPos.y + startPos.height;
-                }
-
-                // Default top entry for next node
-                x2 = endPos.centerX;
-                y2 = endPos.y;
-
-                // If it's a loop back to an earlier node (higher up)
-                if (endPos.y < startPos.y && Math.abs(endPos.x - startPos.x) < startPos.width) {
-                     x1 = startPos.centerX; // Exit from bottom
-                     y1 = startPos.y + startPos.height;
-                     x2 = endPos.centerX; // Enter from top
-                     y2 = endPos.y;
-                     // Could add more sophisticated routing for loops here, e.g. using side connectors
-                } else if (endPos.x < startPos.x) { // Connecting to a node to the left
-                    x1 = startPos.x;
-                    y1 = startPos.centerY;
-                    x2 = endPos.x + endPos.width;
-                    y2 = endPos.centerY;
-                } else if (endPos.x > startPos.x + startPos.width) { // Connecting to a node to the right
-                    x1 = startPos.x + startPos.width;
-                    y1 = startPos.centerY;
-                    x2 = endPos.x;
-                    y2 = endPos.centerY;
-                }
-
-
-                line.setAttribute('x1', x1);
-                line.setAttribute('y1', y1);
-                line.setAttribute('x2', x2);
-                line.setAttribute('y2', y2);
-                line.setAttribute('stroke', settings.colors.line);
-                line.setAttribute('class', 'line-connector');
-                line.setAttribute('marker-end', 'url(#arrowhead)');
-                workflowDiagramSvg.insertBefore(line, workflowDiagramSvg.firstChild);
-
-                if (childInfo.text) { // Decision line label
-                    const labelX = (x1 + x2) / 2 + (x1 > x2 || y1 > y2 ? -5 : 5); // slight offset
-                    const labelY = (y1 + y2) / 2 - 5; // slight offset
-                    const textLabel = document.createElementNS(SVG_NS, 'text');
-                    textLabel.setAttribute('x', labelX);
-                    textLabel.setAttribute('y', labelY);
-                    textLabel.setAttribute('fill', settings.colors.lineLabel);
-                    textLabel.setAttribute('class', 'line-label');
-                    textLabel.textContent = childInfo.text;
-                    workflowDiagramSvg.insertBefore(textLabel, workflowDiagramSvg.firstChild);
-                }
-            });
-        });
-
-        // Add arrowhead marker definition (if not already there, but clearing SVG so it's fine)
-        const defs = document.createElementNS(SVG_NS, 'defs');
         const marker = document.createElementNS(SVG_NS, 'marker');
         marker.setAttribute('id', 'arrowhead');
         marker.setAttribute('markerWidth', '10'); // Size of the viewport for the marker
@@ -460,30 +460,256 @@ document.addEventListener('DOMContentLoaded', () => {
         // However, direct 'fill' is more reliable across SVG viewers.
         polygon.setAttribute('fill', settings.colors.line);
         marker.appendChild(polygon);
-
-        // Check if defs already exists, if not create it
-        let defs = workflowDiagramSvg.querySelector('defs');
-        if (!defs) {
-            defs = document.createElementNS(SVG_NS, 'defs');
-            workflowDiagramSvg.insertBefore(defs, workflowDiagramSvg.firstChild);
-        }
-
-        // Remove old arrowhead if it exists to update color
-        const oldMarker = defs.querySelector('#arrowhead');
-        if (oldMarker) {
-            defs.removeChild(oldMarker);
-        }
         defs.appendChild(marker);
+    }
 
-        // Auto-sizing of SVG
-        const padding = 50; // Padding around the content
-        // Ensure globalMaxX and globalMaxY are valid numbers, default to minimum SVG size if no nodes
-        const finalWidth = Object.keys(nodePositions).length > 0 ? globalMaxX + padding : 800;
-        const finalHeight = Object.keys(nodePositions).length > 0 ? globalMaxY + padding : 600;
+    // --- Connection Handle Logic ---
+    function addConnectionHandles(node, settings) {
+        if (!node.svgNode) return;
+        const handleRadius = 5;
+        const nodeColors = settings.colors[node.type] || settings.colors.action;
 
-        workflowDiagramSvg.setAttribute('width', finalWidth);
-        workflowDiagramSvg.setAttribute('height', finalHeight);
-        workflowDiagramSvg.setAttribute('viewBox', `0 0 ${finalWidth} ${finalHeight}`);
+        // Define handle positions (relative to the node's group)
+        const handlePositions = [
+            { x: node.width / 2, y: 0, id: 'top' },    // Top-middle
+            { x: node.width / 2, y: node.height, id: 'bottom' }, // Bottom-middle
+            { x: 0, y: node.height / 2, id: 'left' },  // Left-middle
+            { x: node.width, y: node.height / 2, id: 'right' } // Right-middle
+        ];
+
+        handlePositions.forEach(pos => {
+            const handle = document.createElementNS(SVG_NS, 'circle');
+            handle.setAttribute('cx', String(pos.x));
+            handle.setAttribute('cy', String(pos.y));
+            handle.setAttribute('r', String(handleRadius));
+            handle.setAttribute('fill', nodeColors.stroke); // Use node's stroke color for handle
+            handle.setAttribute('stroke', nodeColors.fill); // Contrasting border
+            handle.setAttribute('stroke-width', '1');
+            handle.setAttribute('class', 'connection-handle');
+            handle.style.cursor = 'crosshair';
+
+            node.svgNode.appendChild(handle);
+
+            handle.addEventListener('mousedown', (e) => {
+                e.stopPropagation(); // Prevent node drag from starting
+                e.preventDefault();
+                if (e.button !== 0) return;
+
+                isDrawingLine = true;
+                lineFromNode = node;
+                // lineFromPort = pos.id; // Store which port was clicked
+
+                const CTM = workflowDiagramSvg.getScreenCTM().inverse();
+                const startPoint = new DOMPoint(e.clientX, e.clientY).matrixTransform(CTM);
+
+                tempLineElement = document.createElementNS(SVG_NS, 'line');
+                tempLineElement.setAttribute('x1', String(node.x + pos.x));
+                tempLineElement.setAttribute('y1', String(node.y + pos.y));
+                tempLineElement.setAttribute('x2', String(startPoint.x));
+                tempLineElement.setAttribute('y2', String(startPoint.y));
+                tempLineElement.setAttribute('stroke', settings.colors.line || 'black');
+                tempLineElement.setAttribute('stroke-width', '2');
+                tempLineElement.setAttribute('stroke-dasharray', '5,5'); // Dashed line for temp
+                workflowDiagramSvg.appendChild(tempLineElement);
+
+                document.addEventListener('mousemove', onDrawingLine);
+                document.addEventListener('mouseup', onEndLineDrawing);
+            });
+        });
+    }
+
+    function onDrawingLine(e) {
+        if (!isDrawingLine || !tempLineElement) return;
+        e.preventDefault();
+
+        const CTM = workflowDiagramSvg.getScreenCTM().inverse();
+        const currentPoint = new DOMPoint(e.clientX, e.clientY).matrixTransform(CTM);
+
+        tempLineElement.setAttribute('x2', String(currentPoint.x));
+        tempLineElement.setAttribute('y2', String(currentPoint.y));
+    }
+
+    function onEndLineDrawing(e) {
+        if (!isDrawingLine) return;
+        e.preventDefault();
+
+        let lineToNode = null;
+        // Basic hit detection: check if mouse up is over any node's main shape
+        // More precise would be checking against other connection handles.
+        const CTM = workflowDiagramSvg.getScreenCTM().inverse();
+        const endPoint = new DOMPoint(e.clientX, e.clientY).matrixTransform(CTM);
+
+        activeNodeMap.forEach(node => {
+            if (node !== lineFromNode) { // Can't connect to self
+                // Check if endPoint is within node bounds (simple rect check)
+                if (endPoint.x >= node.x && endPoint.x <= node.x + node.width &&
+                    endPoint.y >= node.y && endPoint.y <= node.y + node.height) {
+                    lineToNode = node;
+                }
+            }
+        });
+
+        if (lineFromNode && lineToNode) {
+            console.log(`Attempting to connect ${lineFromNode.id} to ${lineToNode.id}`);
+            // --- Update Data Model ---
+            // This is highly simplified. Only handles simple 'nextStepID' for non-decision nodes.
+            // Does not handle removing old connections or decision node options.
+            if (lineFromNode.type !== 'decision' && lineFromNode.nextStepID !== undefined) {
+                // Remove old connection from children list if it exists
+                const oldChildIndex = lineFromNode.children.findIndex(child => child.id === lineFromNode.nextStepID);
+                if (oldChildIndex > -1) lineFromNode.children.splice(oldChildIndex,1);
+
+                const oldNextNode = activeNodeMap.get(lineFromNode.nextStepID);
+                if(oldNextNode){
+                    const parentIndex = oldNextNode.parents.indexOf(lineFromNode.id);
+                    if(parentIndex > -1) oldNextNode.parents.splice(parentIndex, 1);
+                }
+
+
+                lineFromNode.nextStepID = lineToNode.id;
+
+                // Update children/parents for the new connection
+                if (!lineFromNode.children.find(child => child.id === lineToNode.id)) {
+                     lineFromNode.children.push({id: lineToNode.id}); // Add new child
+                }
+                if (!lineToNode.parents.includes(lineFromNode.id)) {
+                    lineToNode.parents.push(lineFromNode.id); // Add new parent
+                }
+
+                // For a full solution, we'd need to update decision options, clear old connections etc.
+                // For now, just trigger a full re-render to show the new connection.
+                // This will recalculate layout which might not be desired if nodes were manually moved.
+                // A more targeted update of just lines would be better.
+                rerenderCurrentWorkflow(); // This re-calculates layout and redraws everything
+            } else {
+                console.warn("Connection logic only supports action->nextStepID for now or source node is a decision.");
+            }
+        } else {
+            console.log("Line drawing cancelled or no valid target.");
+        }
+
+        if (tempLineElement) {
+            tempLineElement.remove();
+            tempLineElement = null;
+        }
+        isDrawingLine = false;
+        lineFromNode = null;
+        document.removeEventListener('mousemove', onDrawingLine);
+        document.removeEventListener('mouseup', onEndLineDrawing);
+    }
+
+
+    // --- Drag and Drop Logic ---
+    function makeDraggable(node) {
+        if (!node || !node.svgNode) return;
+        const svgNodeElement = node.svgNode;
+
+        svgNodeElement.addEventListener('mousedown', (e) => {
+            e.preventDefault();
+            if (e.button !== 0) return; // Only main mouse button
+
+            draggedNode = node;
+            draggedNode.svgNode.style.cursor = 'grabbing';
+
+            // Calculate offset from the node's top-left to the mouse click point
+            // We need the mouse position relative to the SVG container
+            const CTM = workflowDiagramSvg.getScreenCTM();
+            const svgMouseX = (e.clientX - CTM.e) / CTM.a;
+            const svgMouseY = (e.clientY - CTM.f) / CTM.d;
+
+            dragOffsetX = svgMouseX - draggedNode.x;
+            dragOffsetY = svgMouseY - draggedNode.y;
+
+            document.addEventListener('mousemove', onDrag);
+            document.addEventListener('mouseup', onDragEnd);
+        });
+    }
+
+    function onDrag(e) {
+        if (!draggedNode) return;
+        e.preventDefault();
+
+        const CTM = workflowDiagramSvg.getScreenCTM();
+        const newSvgMouseX = (e.clientX - CTM.e) / CTM.a;
+        const newSvgMouseY = (e.clientY - CTM.f) / CTM.d;
+
+        draggedNode.x = newSvgMouseX - dragOffsetX;
+        draggedNode.y = newSvgMouseY - dragOffsetY;
+
+        // Update visual position of the node
+        draggedNode.svgNode.setAttribute('transform', `translate(${draggedNode.x}, ${draggedNode.y})`);
+
+        updateConnectedLines(draggedNode);
+    }
+
+    function onDragEnd(e) {
+        if (!draggedNode) return;
+        e.preventDefault();
+
+        draggedNode.svgNode.style.cursor = 'grab';
+        draggedNode = null;
+
+        document.removeEventListener('mousemove', onDrag);
+        document.removeEventListener('mouseup', onDragEnd);
+
+        // Optional: Snap to grid or other cleanup can be done here.
+        // The activeNodeMap already has the updated x, y for the dragged node.
+    }
+
+    function updateConnectedLines(node) {
+        // Update outgoing lines
+        node.children.forEach(childInfo => {
+            const childNode = activeNodeMap.get(childInfo.id);
+            if (childNode) {
+                const lineElem = node.svgLines[childInfo.id]; // Get from stored ref
+                const labelElem = node.svgLineLabels ? node.svgLineLabels[childInfo.id] : null; // Get label ref
+                if (lineElem) {
+                    const {x1, y1, x2, y2} = getLineCoordinates(node, childNode, childInfo.text);
+                    lineElem.setAttribute('x1', String(x1));
+                    lineElem.setAttribute('y1', String(y1));
+                    lineElem.setAttribute('x2', String(x2));
+                    lineElem.setAttribute('y2', String(y2));
+
+                    if (labelElem && childInfo.text) {
+                        const midX = (x1 + x2) / 2;
+                        const midY = (y1 + y2) / 2;
+                        const offsetX = (x1 > x2 || y1 > y2 && !(x1 < x2 && y1 <y2)) ? -15 : 15;
+                        const offsetY = -15;
+                        labelElem.setAttribute('x', String(midX + offsetX));
+                        labelElem.setAttribute('y', String(midY + offsetY));
+                    }
+                }
+            }
+        });
+
+        // Update incoming lines
+        node.parents.forEach(parentId => {
+            const parentNode = activeNodeMap.get(parentId);
+            if (parentNode) {
+                 // Find which childInfo in parentNode.children corresponds to the current node
+                const parentChildInfo = parentNode.children.find(c => c.id === node.id);
+                if (parentChildInfo) {
+                    const lineElem = parentNode.svgLines[node.id]; // Get from stored ref on parent
+                    const labelElem = parentNode.svgLineLabels ? parentNode.svgLineLabels[node.id] : null;
+                    if (lineElem) {
+                        const {x1, y1, x2, y2} = getLineCoordinates(parentNode, node, parentChildInfo.text);
+                        lineElem.setAttribute('x1', String(x1));
+                        lineElem.setAttribute('y1', String(y1));
+                        lineElem.setAttribute('x2', String(x2));
+                        lineElem.setAttribute('y2', String(y2));
+
+                         if (labelElem && parentChildInfo.text) {
+                            const midX = (x1 + x2) / 2;
+                            const midY = (y1 + y2) / 2;
+                            const offsetX = (x1 > x2 || y1 > y2 && !(x1 < x2 && y1 <y2)) ? -15 : 15;
+                            const offsetY = -15;
+                            labelElem.setAttribute('x', String(midX + offsetX));
+                            labelElem.setAttribute('y', String(midY + offsetY));
+                        }
+                    }
+                }
+            }
+        });
     }
 
     function createSvgText(text, x, y, maxWidth, textColor) {
@@ -649,6 +875,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
 
     // --- Event Listeners ---
+    workflowSelect.addEventListener('change', (event) => {
+        loadWorkflow(event.target.value);
+    });
+
     colorSchemaSelect.addEventListener('change', () => {
         updateColorSchemaPreview(); // This already calls renderWorkflow if data exists
     });
@@ -676,11 +906,18 @@ document.addEventListener('DOMContentLoaded', () => {
     downloadSvgButton.addEventListener('click', downloadSvg);
 
     // --- Initialization ---
+    populateWorkflowSelect();
     populateColorSchemaDropdown();
     updateColorSchemaPreview(); // Set initial preview and colors
 
-    // Initial load
-    loadWorkflow('workflows/qa_process.json');
+    // Initial load (load the first workflow in the list)
+    if (availableWorkflows.length > 0) {
+        workflowSelect.value = availableWorkflows[0].path; // Set dropdown to first workflow
+        loadWorkflow(availableWorkflows[0].path);
+    } else {
+        console.warn("No workflows defined in availableWorkflows array.");
+        workflowDiagramSvg.innerHTML = `<text x="20" y="40" fill="red">No workflows available to load.</text>`;
+    }
 
     console.log("app.js loaded and initialized.");
 });
