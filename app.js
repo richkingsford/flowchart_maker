@@ -155,7 +155,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             activeNodeMap = prepareWorkflowData(currentWorkflowData);
             const layoutDimensions = calculateStaticLayout(activeNodeMap, currentSettings);
-            drawDiagram(activeNodeMap, settings, layoutDimensions);
+            drawDiagram(activeNodeMap, currentSettings, layoutDimensions);
 
             console.log("Workflow data processed and rendered:", activeNodeMap);
 
