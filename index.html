@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Workflow Diagram Generator</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="controls">
+        <div>
+            <label for="colorSchemaSelect">Color Schema:</label>
+            <select id="colorSchemaSelect"></select>
+            <div id="colorSchemaPreview"></div>
+        </div>
+        <div>
+            <label for="horizontalSpacing">Horizontal Spacing:</label>
+            <input type="number" id="horizontalSpacing" value="150" min="50">
+        </div>
+        <div>
+            <label for="verticalSpacing">Vertical Spacing:</label>
+            <input type="number" id="verticalSpacing" value="100" min="30">
+        </div>
+        <button id="downloadSvgButton">Download SVG</button>
+    </div>
+    <svg id="workflowDiagram" width="800" height="600"></svg>
+    <script src="app.js"></script>
+</body>
+</html>
