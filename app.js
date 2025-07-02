@@ -216,56 +216,85 @@ document.addEventListener('DOMContentLoaded', () => {
         return nodeMap;
     }
 
-    function calculateNodeDimensions(stepName) {
-        const fontSize = currentSettings.fontSize || 12;
-        const lineHeightFactor = 1.2;
-        const targetNodeWidth = defaultNodeSize.width; // Keep node width fixed for now
-        const maxWidthForText = targetNodeWidth - (nodePadding.x * 2);
+    // Helper function for robust text line splitting and counting
+    function getLineCountAndConfiguration(text, maxWidth, fontSize) {
+        const words = String(text).split(/[\s-]+/);
+        let lineCount = 0;
+        let currentLineForMeasurement = "";
+        const linesArray = []; // To store the actual lines of text
 
         // Use an off-screen SVG text element to measure text accurately
         const tempSvg = document.createElementNS(SVG_NS, "svg");
         tempSvg.style.position = 'absolute';
-        tempSvg.style.visibility = 'hidden';
+        tempSvg.style.top = '-9999px'; // Move off-screen
+        tempSvg.style.left = '-9999px';
+        tempSvg.style.visibility = 'hidden'; // Still hidden, but position helps too
+        tempSvg.style.width = 'auto';
+        tempSvg.style.height = 'auto';
         document.body.appendChild(tempSvg);
 
         const tempTextElement = document.createElementNS(SVG_NS, 'text');
         tempTextElement.style.fontSize = `${fontSize}px`;
-        tempTextElement.style.fontFamily = 'Arial, sans-serif'; // Match CSS
-        tempTextElement.setAttribute('class', 'node-text'); // Apply class for any font styles
+        tempTextElement.style.fontFamily = 'Arial, sans-serif';
+        tempTextElement.setAttribute('class', 'node-text');
         tempSvg.appendChild(tempTextElement);
 
-        const words = String(stepName).split(/[\s-]+/);
-        let lineCount = 0;
-        let currentLineText = "";
-
-        if (words.length === 0 || (words.length === 1 && words[0] === "")) {
-            lineCount = 1; // For empty names, still occupy one line height
+        if (words.length === 0 || (words.length === 1 && words[0].trim() === "")) {
+            lineCount = 1;
+            linesArray.push(" "); // Add a space to ensure it takes up some height visually
         } else {
             for (let i = 0; i < words.length; i++) {
                 const word = words[i];
-                if (lineCount === 0) { // First word for the first line
-                    currentLineText = word;
+                if (word.trim() === "" && currentLineForMeasurement.trim() === "") continue; // Skip multiple leading spaces
+
+                if (lineCount === 0) {
+                    currentLineForMeasurement = word;
                     lineCount = 1;
                 } else {
-                    const testLine = currentLineText.length > 0 ? `${currentLineText} ${word}` : word;
+                    const testLine = currentLineForMeasurement.length > 0 ? `${currentLineForMeasurement} ${word}` : word;
                     tempTextElement.textContent = testLine;
-                    if (tempTextElement.getComputedTextLength() > maxWidthForText && currentLineText.length > 0) {
+                    if (tempTextElement.getComputedTextLength() > maxWidth && currentLineForMeasurement.length > 0) {
+                        linesArray.push(currentLineForMeasurement);
                         lineCount++;
-                        currentLineText = word; // Start new line with current word
+                        currentLineForMeasurement = word;
                     } else {
-                        currentLineText = testLine;
+                        currentLineForMeasurement = testLine;
                     }
                 }
             }
-            // If after loop, currentLineText has content but lineCount didn't increment for it (e.g. single line)
-            // This logic is covered by initializing lineCount to 1 when first word is processed for first line.
+            if (currentLineForMeasurement.length > 0) { // Add the last line
+                 linesArray.push(currentLineForMeasurement);
+            }
+            if (linesArray.length === 0 && lineCount === 1 && currentLineForMeasurement.trim() === "") {
+                // This can happen if the input text was just spaces
+                linesArray.push(" ");
+            } else if (linesArray.length === 0 && lineCount === 1 && currentLineForMeasurement.length > 0){
+                // This can happen if all text fits on one line and it wasn't pushed yet
+                linesArray.push(currentLineForMeasurement);
+            }
+
         }
 
-        document.body.removeChild(tempSvg); // Clean up temp SVG
+        document.body.removeChild(tempSvg);
+        // Ensure lineCount is at least 1 if linesArray has content, or if it was empty.
+        if (linesArray.length > 0 && lineCount === 0) lineCount = linesArray.length;
+        if (lineCount === 0) lineCount = 1; // Must be at least 1 for height calc if text was empty.
+
+        return { lineCount, linesArray };
+    }
+
+    function calculateNodeDimensions(stepName) {
+        const fontSize = currentSettings.fontSize || 12;
+        const lineHeightFactor = 1.2;
+        const targetNodeWidth = defaultNodeSize.width;
+        const maxWidthForText = targetNodeWidth - (nodePadding.x * 2);
+
+        const { lineCount } = getLineCountAndConfiguration(stepName, maxWidthForText, fontSize);
 
         const textBlockHeight = lineCount * fontSize * lineHeightFactor;
         const calculatedHeight = Math.max(defaultNodeSize.height, textBlockHeight + (nodePadding.y * 2));
 
+        // console.log(`[TextWrap Debug] Step: "${stepName}", Lines: ${lineCount}, CalcHeight: ${calculatedHeight}, FontSize: ${fontSize}`);
         return { width: targetNodeWidth, height: calculatedHeight };
     }
 
@@ -765,90 +794,40 @@ document.addEventListener('DOMContentLoaded', () => {
         textElement.setAttribute('x', String(x)); // Ensure x is string for setAttribute
         textElement.setAttribute('class', 'node-text');
         textElement.setAttribute('fill', textColor);
-        textElement.style.textAnchor = 'middle'; // Ensure it's middle anchored via style too
-        // dominant-baseline is set in CSS, but can be set here too if needed:
-        // textElement.style.dominantBaseline = 'middle';
+        textElement.style.textAnchor = 'middle';
 
-
-        const words = text.split(/[\s-]+/); // Split by space or hyphen for better wrapping
-        let tspanElement = document.createElementNS(SVG_NS, 'tspan');
-        textElement.appendChild(tspanElement);
-        let lineCount = 0;
-        let currentLine = "";
-
-        function addNewLine() {
-            tspanElement = document.createElementNS(SVG_NS, 'tspan');
-            tspanElement.setAttribute('x', String(x));
-            tspanElement.setAttribute('dy', lineCount === 0 ? '0' : '1.2em'); // No dy for first line from text y, then 1.2em for subsequent
-            textElement.appendChild(tspanElement);
-            lineCount++;
-            return tspanElement;
-        }
-
-        tspanElement = addNewLine(); // Start the first line
-
-        for (let i = 0; i < words.length; i++) {
-            const word = words[i];
-            const separator = currentLine.length === 0 ? "" : " ";
-            const testLine = currentLine + separator + word;
-            tspanElement.textContent = testLine;
-
-            if (tspanElement.getComputedTextLength() > maxWidth && currentLine.length > 0) {
-                // Word makes the line too long, and it's not the first word on this line
-                tspanElement.textContent = currentLine; // Set previous line content
-
-                currentLine = word; // Start new line with current word
-                tspanElement = addNewLine();
-                tspanElement.textContent = currentLine;
-
-                // If the word itself is too long, it will overflow.
-                // A more complex solution would be character-by-character wrapping or hyphenation.
-                // For now, we accept that very long single words might overflow.
-            } else {
-                currentLine = testLine;
-                tspanElement.textContent = currentLine; // Update tspan with the current valid line
-            }
-        }
-
-        // Vertical centering:
         const currentFontSize = currentSettings.fontSize || 12;
         const lineHeightFactor = 1.2;
-        // const textBlockHeight = lineCount * currentFontSize * lineHeightFactor; // Already calculated for node height
 
-        // Adjust the initial y attribute of the <text> element to center the block
-        // The 'y' passed in is the center of the node.
-        // We want the center of the text block to align with this 'y'.
-        // So, the first tspan should start at y - textBlockHeight/2 + (fontSize*lineHeight)/2 (approx baseline of first line)
-        // However, dominant-baseline:middle on text and dy on tspans handles much of this.
-        // The main adjustment is for the initial y of the text element itself.
-        // If dominant-baseline="middle", y is the vertical center.
-        // Each tspan with dy="1.2em" shifts down.
-        // The first tspan has dy="0" (or no dy, taking text's y).
-        // So we need to shift the whole text element up by half of (number_of_lines - 1) * line_height
-        // textElement.setAttribute('y', String(y - ((lineCount - 1) * fontSize * lineHeight) / 2));
-        // Let's try with dominant-baseline: central and adjusting dy for the first line.
-        // This is tricky. Let's rely on dominant-baseline: middle and dy.
-        // The first line should not have a dy if y is the intended baseline for the first line.
-        // If y is the center, then the first line's dy should pull it up.
+        // Use the same line splitting logic for rendering as for dimension calculation
+        const { lineCount, linesArray } = getLineCountAndConfiguration(text, maxWidth, currentFontSize);
 
-        // Correct approach with dominant-baseline: middle for the <text> element:
-        // The 'y' attribute of <text> is its vertical center.
-        // Each <tspan> is relative to this.
-        // The first <tspan> needs to be shifted up by half the total text block height,
-        // then down by half a line height to position its own center at the start.
-        // (lineCount / 2 - 0.5) gives the number of full line heights to shift up from center.
-        // For dominant-baseline: middle, the y attribute of <text> is the center.
-        // The first tspan needs to be shifted up by (lineCount - 1) / 2 * actual_line_height.
-        const actualLineHeight = currentFontSize * lineHeightFactor;
-        const initialDyOffset = -((lineCount - 1) / 2) * actualLineHeight;
-
-        const firstTspan = textElement.querySelector('tspan'); // Should always exist due to addNewLine() logic
-        if (firstTspan) { // Should always be true
-            firstTspan.setAttribute('dy', `${initialDyOffset}px`);
+        // Ensure linesArray has at least one element (e.g. a space for empty text)
+        // This is typically handled by getLineCountAndConfiguration returning linesArray with at least one entry.
+        if (linesArray.length === 0) {
+             console.warn("[TextWrap Debug] linesArray is empty in createSvgText for text:", text);
+             linesArray.push(" "); // Fallback to prevent error, though getLineCountAndConfiguration should prevent this.
         }
 
-        textElement.setAttribute('y', String(y)); // Set the main y attribute for the text block's center
-        textElement.style.fontSize = `${currentFontSize}px`; // Apply font size
+
+        linesArray.forEach((lineContent, index) => {
+            const tspanElement = document.createElementNS(SVG_NS, 'tspan');
+            tspanElement.setAttribute('x', String(x));
+            if (index === 0) {
+                // Vertical centering for the entire block of text
+                // dominant-baseline="middle" on the main <text> element centers it around its 'y' attribute.
+                // This initial dy adjusts the first line relative to that center.
+                const initialDyOffset = -((lineCount - 1) / 2) * (currentFontSize * lineHeightFactor);
+                tspanElement.setAttribute('dy', `${initialDyOffset}px`);
+            } else {
+                tspanElement.setAttribute('dy', `${lineHeightFactor}em`); // Subsequent lines relative to previous
+            }
+            tspanElement.textContent = lineContent; // Use pre-calculated line content
+            textElement.appendChild(tspanElement);
+        });
+
+        textElement.setAttribute('y', String(y));
+        textElement.style.fontSize = `${currentFontSize}px`;
 
         return textElement;
     }
