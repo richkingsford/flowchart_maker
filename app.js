@@ -5,6 +5,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const colorSchemaPreview = document.getElementById('colorSchemaPreview');
     const horizontalSpacingInput = document.getElementById('horizontalSpacing');
     const verticalSpacingInput = document.getElementById('verticalSpacing');
+    const fontSizeInput = document.getElementById('fontSizeInput');
     const downloadSvgButton = document.getElementById('downloadSvgButton');
     const workflowDiagramSvg = document.getElementById('workflowDiagram');
 
@@ -20,7 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const colorSchemas = {
         default: {
             name: "Default",
-            action: { fill: '#AEC6CF', stroke: '#7C98A5', text: '#000000' }, // Pastel Blue
+            action: { fill: '#5DADE2', stroke: '#2E86C1', text: '#FFFFFF' }, // Brighter Blue, White Text
             decision: { fill: '#FFDAB9', stroke: '#E0B990', text: '#000000' }, // Peach
             terminal: { fill: '#C1E1C1', stroke: '#97B897', text: '#000000' }, // Pastel Green
             line: '#555555',
@@ -60,7 +61,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentSettings = {
         colors: colorSchemas.default,
         hSpacing: parseInt(horizontalSpacingInput.value),
-        vSpacing: parseInt(verticalSpacingInput.value)
+        vSpacing: parseInt(verticalSpacingInput.value),
+        fontSize: parseInt(fontSizeInput.value) || 12
     };
 
     // --- Functions ---
@@ -210,23 +212,39 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function calculateNodeDimensions(stepName) {
-        const avgCharWidth = 8;
-        const maxCharsPerLine = Math.floor((defaultNodeSize.width - 2 * nodePadding.x) / avgCharWidth);
-        const words = String(stepName).split(/[\s-]+/); // Ensure stepName is a string
-        let lines = 1;
-        let currentLineLength = 0;
-        words.forEach(word => {
-            if (currentLineLength + word.length + (currentLineLength > 0 ? 1 : 0) > maxCharsPerLine) {
-                lines++;
-                currentLineLength = word.length;
-            } else {
-                currentLineLength += word.length + (currentLineLength > 0 ? 1 : 0);
-            }
-        });
-        const textHeight = lines * 12 * 1.2;
-        const height = Math.max(defaultNodeSize.height, textHeight + 2 * nodePadding.y);
-        const width = defaultNodeSize.width;
-        return { width, height };
+        const fontSize = currentSettings.fontSize || 12; // Use current font size or default
+        const lineHeightFactor = 1.2;
+        const avgCharWidth = fontSize * 0.6; // Rough estimate, depends on font
+        const targetNodeWidth = defaultNodeSize.width; // Use fixed width for now
+
+        const maxCharsPerLine = Math.floor((targetNodeWidth - 2 * nodePadding.x) / avgCharWidth);
+        const words = String(stepName).split(/[\s-]+/);
+
+        let lines = 0;
+        let currentLine = "";
+
+        if (words.length === 0 || (words.length === 1 && words[0] === "")) {
+            lines = 1; // Ensure at least one line for empty or whitespace-only names
+        } else {
+            words.forEach(word => {
+                if (currentLine.length === 0) {
+                    currentLine = word;
+                    if (lines === 0) lines = 1; // Start counting lines with the first word
+                } else if ((currentLine + " " + word).length > maxCharsPerLine) {
+                    lines++;
+                    currentLine = word;
+                } else {
+                    currentLine += " " + word;
+                }
+            });
+             if (lines === 0 && currentLine.length > 0) lines = 1; // Case where all words fit on one line but loop didn't increment
+        }
+        if (lines === 0) lines = 1; // Final fallback for truly empty strings after processing
+
+        const textBlockHeight = lines * fontSize * lineHeightFactor;
+        const calculatedHeight = Math.max(defaultNodeSize.height, textBlockHeight + 2 * nodePadding.y);
+
+        return { width: targetNodeWidth, height: calculatedHeight };
     }
 
     function calculateStaticLayout(nodeMap, settings) {
@@ -763,10 +781,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         // Vertical centering:
-        // Calculate the total height of the text block
-        const fontSize = 12; // Assuming 12px font size from CSS
-        const lineHeight = 1.2; // em
-        const textBlockHeight = lineCount * fontSize * lineHeight;
+        const currentFontSize = currentSettings.fontSize || 12;
+        const lineHeightFactor = 1.2;
+        // const textBlockHeight = lineCount * currentFontSize * lineHeightFactor; // Already calculated for node height
 
         // Adjust the initial y attribute of the <text> element to center the block
         // The 'y' passed in is the center of the node.
@@ -790,13 +807,18 @@ document.addEventListener('DOMContentLoaded', () => {
         // The first <tspan> needs to be shifted up by half the total text block height,
         // then down by half a line height to position its own center at the start.
         // (lineCount / 2 - 0.5) gives the number of full line heights to shift up from center.
-        const initialDyOffset = -( (lineCount -1) / 2 ) * lineHeight * fontSize;
-        const firstTspan = textElement.querySelector('tspan');
-        if (firstTspan) {
+        // For dominant-baseline: middle, the y attribute of <text> is the center.
+        // The first tspan needs to be shifted up by (lineCount - 1) / 2 * actual_line_height.
+        const actualLineHeight = currentFontSize * lineHeightFactor;
+        const initialDyOffset = -((lineCount - 1) / 2) * actualLineHeight;
+
+        const firstTspan = textElement.querySelector('tspan'); // Should always exist due to addNewLine() logic
+        if (firstTspan) { // Should always be true
             firstTspan.setAttribute('dy', `${initialDyOffset}px`);
         }
-         textElement.setAttribute('y', String(y));
 
+        textElement.setAttribute('y', String(y)); // Set the main y attribute for the text block's center
+        textElement.style.fontSize = `${currentFontSize}px`; // Apply font size
 
         return textElement;
     }
@@ -899,6 +921,16 @@ document.addEventListener('DOMContentLoaded', () => {
             currentSettings.vSpacing = newVSpacing;
             if (currentWorkflowData) {
                 renderWorkflow(currentWorkflowData, currentSettings);
+            }
+        }
+    });
+
+    fontSizeInput.addEventListener('input', () => {
+        const newFontSize = parseInt(fontSizeInput.value);
+        if (!isNaN(newFontSize) && newFontSize >= parseInt(fontSizeInput.min) && newFontSize <= parseInt(fontSizeInput.max)) {
+            currentSettings.fontSize = newFontSize;
+            if (currentWorkflowData) {
+                rerenderCurrentWorkflow();
             }
         }
     });
