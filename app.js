@@ -743,7 +743,10 @@ document.addEventListener('DOMContentLoaded', () => {
         if (tempReconnectionLine) {
             tempReconnectionLine.remove();
             tempReconnectionLine = null;
-        }
+        } // Assuming the 'else' was mistakenly added after this if block or inside it without proper structure.
+        // If there's an 'else' token at line 731, it's likely orphaned.
+        // The original logic did not have an else here. We ensure it's removed.
+
         isReconnectingLine = false;
         reconnectSourceNode = null;
         reconnectLineOriginalTargetId = null;
