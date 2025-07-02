@@ -21,7 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const colorSchemas = {
         default: {
             name: "Default",
-            action: { fill: '#5DADE2', stroke: '#2E86C1', text: '#FFFFFF' }, // Brighter Blue, White Text
+            action: { fill: '#A9CCE3', stroke: '#7FB3D5', text: '#000000' }, // Lighter Blue, Black Text
             decision: { fill: '#FFDAB9', stroke: '#E0B990', text: '#000000' }, // Peach
             terminal: { fill: '#C1E1C1', stroke: '#97B897', text: '#000000' }, // Pastel Green
             line: '#555555',
@@ -169,10 +169,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // This function is called when settings change that require a full re-layout and redraw
     function rerenderCurrentWorkflow() {
-        if (!currentWorkflowData) return;
+        console.log('[Spacing Debug] rerenderCurrentWorkflow called. currentSettings:', JSON.parse(JSON.stringify(currentSettings)));
+        if (!currentWorkflowData) {
+            console.log('[Spacing Debug] No currentWorkflowData, aborting rerender.');
+            return;
+        }
         activeNodeMap = prepareWorkflowData(currentWorkflowData); // Re-prep to reset any drag positions to original logic
         const layoutDimensions = calculateStaticLayout(activeNodeMap, currentSettings);
         drawDiagram(activeNodeMap, currentSettings, layoutDimensions);
+        console.log('[Spacing Debug] rerenderCurrentWorkflow completed.');
     }
 
 
@@ -212,42 +217,60 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function calculateNodeDimensions(stepName) {
-        const fontSize = currentSettings.fontSize || 12; // Use current font size or default
+        const fontSize = currentSettings.fontSize || 12;
         const lineHeightFactor = 1.2;
-        const avgCharWidth = fontSize * 0.6; // Rough estimate, depends on font
-        const targetNodeWidth = defaultNodeSize.width; // Use fixed width for now
+        const targetNodeWidth = defaultNodeSize.width; // Keep node width fixed for now
+        const maxWidthForText = targetNodeWidth - (nodePadding.x * 2);
 
-        const maxCharsPerLine = Math.floor((targetNodeWidth - 2 * nodePadding.x) / avgCharWidth);
+        // Use an off-screen SVG text element to measure text accurately
+        const tempSvg = document.createElementNS(SVG_NS, "svg");
+        tempSvg.style.position = 'absolute';
+        tempSvg.style.visibility = 'hidden';
+        document.body.appendChild(tempSvg);
+
+        const tempTextElement = document.createElementNS(SVG_NS, 'text');
+        tempTextElement.style.fontSize = `${fontSize}px`;
+        tempTextElement.style.fontFamily = 'Arial, sans-serif'; // Match CSS
+        tempTextElement.setAttribute('class', 'node-text'); // Apply class for any font styles
+        tempSvg.appendChild(tempTextElement);
+
         const words = String(stepName).split(/[\s-]+/);
-
-        let lines = 0;
-        let currentLine = "";
+        let lineCount = 0;
+        let currentLineText = "";
 
         if (words.length === 0 || (words.length === 1 && words[0] === "")) {
-            lines = 1; // Ensure at least one line for empty or whitespace-only names
+            lineCount = 1; // For empty names, still occupy one line height
         } else {
-            words.forEach(word => {
-                if (currentLine.length === 0) {
-                    currentLine = word;
-                    if (lines === 0) lines = 1; // Start counting lines with the first word
-                } else if ((currentLine + " " + word).length > maxCharsPerLine) {
-                    lines++;
-                    currentLine = word;
+            for (let i = 0; i < words.length; i++) {
+                const word = words[i];
+                if (lineCount === 0) { // First word for the first line
+                    currentLineText = word;
+                    lineCount = 1;
                 } else {
-                    currentLine += " " + word;
+                    const testLine = currentLineText.length > 0 ? `${currentLineText} ${word}` : word;
+                    tempTextElement.textContent = testLine;
+                    if (tempTextElement.getComputedTextLength() > maxWidthForText && currentLineText.length > 0) {
+                        lineCount++;
+                        currentLineText = word; // Start new line with current word
+                    } else {
+                        currentLineText = testLine;
+                    }
                 }
-            });
-             if (lines === 0 && currentLine.length > 0) lines = 1; // Case where all words fit on one line but loop didn't increment
+            }
+            // If after loop, currentLineText has content but lineCount didn't increment for it (e.g. single line)
+            // This logic is covered by initializing lineCount to 1 when first word is processed for first line.
         }
-        if (lines === 0) lines = 1; // Final fallback for truly empty strings after processing
 
-        const textBlockHeight = lines * fontSize * lineHeightFactor;
-        const calculatedHeight = Math.max(defaultNodeSize.height, textBlockHeight + 2 * nodePadding.y);
+        document.body.removeChild(tempSvg); // Clean up temp SVG
+
+        const textBlockHeight = lineCount * fontSize * lineHeightFactor;
+        const calculatedHeight = Math.max(defaultNodeSize.height, textBlockHeight + (nodePadding.y * 2));
 
         return { width: targetNodeWidth, height: calculatedHeight };
     }
 
     function calculateStaticLayout(nodeMap, settings) {
+        console.log('[Spacing Debug] calculateStaticLayout received settings:', JSON.parse(JSON.stringify(settings)));
         if (nodeMap.size === 0) return { maxX: 0, maxY: 0 };
         const positionedNodes = new Set();
         let currentGlobalMaxX = 0;
@@ -280,7 +303,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 const optionNo = children.find(opt => opt.text && opt.text.toLowerCase() === 'no');
 
                 if (optionYes && nodeMap.has(optionYes.id)) {
-                    positionRecursive(optionYes.id, node.x + node.width + settings.hSpacing, node.y, levelX + 1, levelY);
+                    const nextYesX = node.x + node.width + settings.hSpacing;
+                    console.log(`[Spacing Debug] Decision ${node.id} 'Yes' branch: nextYesX based on node.x (${node.x}), node.width (${node.width}), hSpacing (${settings.hSpacing}) -> ${nextYesX}`);
+                    positionRecursive(optionYes.id, nextYesX, node.y, levelX + 1, levelY);
                 }
                 if (optionNo && nodeMap.has(optionNo.id)) {
                     let maxYAtCurrentX = node.y + node.height;
@@ -289,14 +314,17 @@ document.addEventListener('DOMContentLoaded', () => {
                              maxYAtCurrentX = n.y + n.height;
                         }
                     });
-                    positionRecursive(optionNo.id, node.x, maxYAtCurrentX + settings.vSpacing, levelX, levelY + 1);
+                    const nextNoY = maxYAtCurrentX + settings.vSpacing;
+                    console.log(`[Spacing Debug] Decision ${node.id} 'No' branch: nextNoY based on maxYAtCurrentX (${maxYAtCurrentX}), vSpacing (${settings.vSpacing}) -> ${nextNoY}`);
+                    positionRecursive(optionNo.id, node.x, nextNoY, levelX, levelY + 1);
                 }
                 // Simplified: other options are not specially positioned beyond the Yes/No paths for now in static layout
             } else if (children.length > 0) {
                 const nextChildInfo = children[0];
                 if (nodeMap.has(nextChildInfo.id)) {
-                    let nextNodeX = node.x + node.width / 4 + settings.hSpacing / 2; // Default diagonal
+                    let nextNodeX = node.x + node.width / 4 + settings.hSpacing / 2;
                     let nextNodeY = node.y + node.height + settings.vSpacing;
+                    console.log(`[Spacing Debug] Action ${node.id} next step: nextNodeX (${nextNodeX}) based on hSpacing (${settings.hSpacing}), nextNodeY (${nextNodeY}) based on vSpacing (${settings.vSpacing})`);
                     positionRecursive(nextChildInfo.id, nextNodeX, nextNodeY, levelX + 1, levelY + 1);
                 }
             }
@@ -307,7 +335,9 @@ document.addEventListener('DOMContentLoaded', () => {
             startNodes.push(nodeMap.get(Array.from(nodeMap.keys())[0]));
         }
         startNodes.forEach((startNode, index) => {
-            positionRecursive(startNode.id, 50 + index * (defaultNodeSize.width + settings.hSpacing), 50, index, 0);
+            const initialXForNode = 50 + index * (defaultNodeSize.width + settings.hSpacing);
+            console.log(`[Spacing Debug] Positioning startNode ${startNode.id} at index ${index}: initialXForNode (${initialXForNode}) based on hSpacing (${settings.hSpacing})`);
+            positionRecursive(startNode.id, initialXForNode, 50, index, 0);
         });
 
         return { maxX: currentGlobalMaxX, maxY: currentGlobalMaxY };
@@ -905,22 +935,28 @@ document.addEventListener('DOMContentLoaded', () => {
         updateColorSchemaPreview(); // This already calls renderWorkflow if data exists
     });
 
-    horizontalSpacingInput.addEventListener('input', () => { // Use 'input' for more responsive updates
+    horizontalSpacingInput.addEventListener('input', () => {
         const newHSpacing = parseInt(horizontalSpacingInput.value);
+        console.log('[Spacing Debug] Horizontal input changed. Parsed value:', newHSpacing);
         if (!isNaN(newHSpacing) && newHSpacing >= parseInt(horizontalSpacingInput.min)) {
             currentSettings.hSpacing = newHSpacing;
+            console.log('[Spacing Debug] currentSettings.hSpacing updated to:', currentSettings.hSpacing);
             if (currentWorkflowData) {
-                renderWorkflow(currentWorkflowData, currentSettings);
+                rerenderCurrentWorkflow(); // Corrected to call rerenderCurrentWorkflow
             }
+        } else {
+            console.log('[Spacing Debug] Horizontal input invalid or out of range.');
         }
     });
 
-    verticalSpacingInput.addEventListener('input', () => { // Use 'input' for more responsive updates
+    verticalSpacingInput.addEventListener('input', () => {
         const newVSpacing = parseInt(verticalSpacingInput.value);
+        console.log('[Spacing Debug] Vertical input changed. Parsed value:', newVSpacing);
         if (!isNaN(newVSpacing) && newVSpacing >= parseInt(verticalSpacingInput.min)) {
             currentSettings.vSpacing = newVSpacing;
+            console.log('[Spacing Debug] currentSettings.vSpacing updated to:', currentSettings.vSpacing);
             if (currentWorkflowData) {
-                renderWorkflow(currentWorkflowData, currentSettings);
+                rerenderCurrentWorkflow(); // Corrected to call rerenderCurrentWorkflow
             }
         }
     });
