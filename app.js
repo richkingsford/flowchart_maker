@@ -21,7 +21,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const colorSchemas = {
         default: {
             name: "Default",
-            action: { fill: '#A9CCE3', stroke: '#7FB3D5', text: '#000000' }, // Lighter Blue, Black Text
+            action: { fill: '#D6EAF8', stroke: '#A9CCE3', text: '#000000' }, // Even Lighter Blue, Black Text
             decision: { fill: '#FFDAB9', stroke: '#E0B990', text: '#000000' }, // Peach
             terminal: { fill: '#C1E1C1', stroke: '#97B897', text: '#000000' }, // Pastel Green
             line: '#555555',
@@ -187,8 +187,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!workflowSteps || workflowSteps.length === 0) return nodeMap;
 
         workflowSteps.forEach(step => {
-            const { width, height } = calculateNodeDimensions(step.name);
-            nodeMap.set(step.id || step.stepID, { // Use step.id if present, fallback to step.stepID
+            const { width, height } = calculateNodeDimensions(step.name, step.type); // Pass node type
+            nodeMap.set(step.id || step.stepID, {
                 ...step,
                 id: step.id || step.stepID,
                 x: 0, y: 0, width, height,
@@ -217,7 +217,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // Helper function for robust text line splitting and counting
-    function getLineCountAndConfiguration(text, maxWidth, fontSize) {
+    function getLineCountAndConfiguration(text, maxWidth, fontSize, nodeType = 'action') {
         const words = String(text).split(/[\s-]+/);
         let lineCount = 0;
         let currentLineForMeasurement = "";
@@ -283,15 +283,22 @@ document.addEventListener('DOMContentLoaded', () => {
         return { lineCount, linesArray };
     }
 
-    function calculateNodeDimensions(stepName) {
+    function calculateNodeDimensions(stepName, nodeType = 'action') {
         const fontSize = currentSettings.fontSize || 12;
         const lineHeightFactor = 1.2;
         const targetNodeWidth = defaultNodeSize.width;
-        const maxWidthForText = targetNodeWidth - (nodePadding.x * 2);
 
-        const { lineCount } = getLineCountAndConfiguration(stepName, maxWidthForText, fontSize);
+        let maxWidthForTextCalculation = targetNodeWidth - (nodePadding.x * 2);
+        if (nodeType === 'decision') {
+            // Reduce effective width for text in diamonds, e.g., by 30% or a fixed pixel amount
+            maxWidthForTextCalculation = (targetNodeWidth - (nodePadding.x * 2)) * 0.7;
+        }
+
+        const { lineCount } = getLineCountAndConfiguration(stepName, maxWidthForTextCalculation, fontSize, nodeType);
 
         const textBlockHeight = lineCount * fontSize * lineHeightFactor;
+        // Node height should still be based on the overall defaultNodeSize for the diamond shape itself,
+        // but text wrapping inside it is tighter. Height calculation should be primarily driven by lineCount.
         const calculatedHeight = Math.max(defaultNodeSize.height, textBlockHeight + (nodePadding.y * 2));
 
         // console.log(`[TextWrap Debug] Step: "${stepName}", Lines: ${lineCount}, CalcHeight: ${calculatedHeight}, FontSize: ${fontSize}`);
@@ -424,7 +431,11 @@ document.addEventListener('DOMContentLoaded', () => {
         shape.setAttribute('fill', nodeColors.fill); shape.setAttribute('stroke', nodeColors.stroke);
         group.appendChild(shape);
 
-        const textElement = createSvgText(node.name, node.width / 2, node.height / 2, node.width - nodePadding.x * 1.5, nodeColors.text);
+        let textMaxWidth = node.width - nodePadding.x * 1.5;
+        if (node.type === 'decision') {
+            textMaxWidth = (node.width - nodePadding.x * 2) * 0.7; // Same reduction as in calculateNodeDimensions
+        }
+        const textElement = createSvgText(node.name, node.width / 2, node.height / 2, textMaxWidth, nodeColors.text);
         group.appendChild(textElement);
         workflowDiagramSvg.appendChild(group);
         node.svgNode = group;
@@ -799,11 +810,16 @@ document.addEventListener('DOMContentLoaded', () => {
         const currentFontSize = currentSettings.fontSize || 12;
         const lineHeightFactor = 1.2;
 
+        // Determine effective maxWidth for text rendering based on node type
+        let effectiveMaxWidth = maxWidth;
+        // The 'nodeType' parameter is not directly available here.
+        // 'createSvgText' is generic. The 'maxWidth' passed to it should already be adjusted.
+        // The adjustment for decision nodes happens in 'drawNode' before calling 'createSvgText'.
+
         // Use the same line splitting logic for rendering as for dimension calculation
-        const { lineCount, linesArray } = getLineCountAndConfiguration(text, maxWidth, currentFontSize);
+        const { lineCount, linesArray } = getLineCountAndConfiguration(text, effectiveMaxWidth, currentFontSize); // Pass effectiveMaxWidth
 
         // Ensure linesArray has at least one element (e.g. a space for empty text)
-        // This is typically handled by getLineCountAndConfiguration returning linesArray with at least one entry.
         if (linesArray.length === 0) {
              console.warn("[TextWrap Debug] linesArray is empty in createSvgText for text:", text);
              linesArray.push(" "); // Fallback to prevent error, though getLineCountAndConfiguration should prevent this.
