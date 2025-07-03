@@ -727,8 +727,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
             connectionSuccessful = true;
             rerenderCurrentWorkflow();
-
-        } else {
+            } // This closes the inner else block: else { console.log(`Reconnecting...`); ... }
+        } // <<<< THIS IS THE NEWLY ADDED CLOSING BRACE for the main if: if (reconnectSourceNode && newTargetNode && ...)
+        else { // This is the else corresponding to the main if
             console.log("Line reconnection cancelled or target is the same/invalid.");
             // Restore original line visibility if connection was not made
             if (reconnectSourceNode && reconnectSourceNode.svgLines[reconnectLineOriginalTargetId]) {
